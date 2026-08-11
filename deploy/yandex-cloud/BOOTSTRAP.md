@@ -1,143 +1,104 @@
-# One-time Yandex Cloud bootstrap
+# Supplier Radar — Yandex-native bootstrap
 
-После этого bootstrap деплой выполняется GitHub Actions по OIDC без долгоживущего Yandex ключа в GitHub.
+Supplier Radar запускается **только средствами Yandex Cloud**: Serverless Containers + Timer + Lockbox. GitHub Actions в контуре поставщиков не используются.
 
-## 0. Требование
+## Архитектура
 
-Нужен один раз авторизованный `yc` CLI с правами создавать IAM/service accounts, role bindings, Container Registry, Lockbox и Serverless resources.
+```text
+Yandex Timer (каждый час)
+  -> private Serverless Container supplier-radar
+  -> Yandex Search API deferred
+  -> direct-site enrichment + geo evidence + deep scan
+  -> Google Sheets: Автокандидаты / Состояние радара / Журнал прогонов
+```
+
+Основной лист `Поставщики` считается проверенной базой и автоматически сырыми результатами Search API не заполняется.
+
+## 1. Требования
+
+На машине для одноразового bootstrap/deploy нужны:
+
+- авторизованный `yc` CLI;
+- `docker`;
+- `jq`;
+- права в нужном Yandex Cloud folder на IAM, Container Registry, Serverless Containers и Lockbox.
 
 ```bash
 export YC_FOLDER_ID='<folder-id>'
 yc config set folder-id "$YC_FOLDER_ID"
 ```
 
-## 1. Service accounts
+## 2. Создать Yandex-native инфраструктуру
 
-### GitHub deploy account
-
-```bash
-yc iam service-account create --name supplier-radar-github
-DEPLOY_SA_ID="$(yc iam service-account get --name supplier-radar-github --format json | jq -r .id)"
-
-for ROLE in \
-  container-registry.images.pusher \
-  serverless-containers.editor \
-  iam.serviceAccounts.user
-do
-  yc resource-manager folder add-access-binding "$YC_FOLDER_ID" \
-    --role "$ROLE" \
-    --subject "serviceAccount:$DEPLOY_SA_ID"
-done
-```
-
-### Container runtime + timer account
+Из корня репозитория:
 
 ```bash
-yc iam service-account create --name supplier-radar-runtime
-RUNTIME_SA_ID="$(yc iam service-account get --name supplier-radar-runtime --format json | jq -r .id)"
-
-for ROLE in \
-  container-registry.images.puller \
-  serverless-containers.containerInvoker
-do
-  yc resource-manager folder add-access-binding "$YC_FOLDER_ID" \
-    --role "$ROLE" \
-    --subject "serviceAccount:$RUNTIME_SA_ID"
-done
+./deploy/yandex-cloud/bootstrap.sh
 ```
 
-`lockbox.payloadViewer` лучше выдать runtime account на конкретные supplier-radar secrets, а не на весь folder.
+Скрипт идемпотентно создаёт/находит:
 
-## 2. Container Registry
+- service account `supplier-radar-runtime`;
+- Container Registry `supplier-radar`;
+- Lockbox secret `supplier-radar-runtime`;
+- минимальные роли runtime account для pull образа, вызова контейнера и чтения конкретного Lockbox secret.
 
-```bash
-yc container registry create --name supplier-radar
-YC_REGISTRY_ID="$(yc container registry get --name supplier-radar --format json | jq -r .id)"
-```
+## 3. Lockbox
 
-## 3. GitHub Workload Identity Federation
+В **одной ACTIVE версии** секрета `supplier-radar-runtime` должны быть ключи:
 
-Issuer / audience / subject привязаны только к текущему GitHub owner/repository/main.
+- `YANDEX_SEARCH_API_KEY` — ключ Search API;
+- `GOOGLE_SERVICE_ACCOUNT_JSON` — JSON сервисного аккаунта Google, которому выдан доступ на запись в таблицу.
 
-```bash
-yc iam workload-identity oidc federation create \
-  --name supplier-radar-github \
-  --issuer 'https://token.actions.githubusercontent.com' \
-  --audiences 'https://github.com/Bailopan' \
-  --jwks-url 'https://token.actions.githubusercontent.com/.well-known/jwks'
+Секреты не передаются обычными environment variables и не хранятся в GitHub.
 
-FEDERATION_ID="$(yc iam workload-identity oidc federation get --name supplier-radar-github --format json | jq -r .id)"
-
-yc iam workload-identity federated-credential create \
-  --service-account-id "$DEPLOY_SA_ID" \
-  --federation-id "$FEDERATION_ID" \
-  --external-subject-id 'repo:Bailopan/OpenClaw-:ref:refs/heads/main'
-```
-
-If the GitHub repository is renamed later, recreate/update the federated credential subject to the new repository name.
-
-## 4. Lockbox
-
-Create one secret, e.g. `supplier-radar-runtime`, with these keys:
-
-- `YANDEX_SEARCH_API_KEY` — required Search API key.
-- `GOOGLE_SERVICE_ACCOUNT_JSON` — optional; required only for direct Google Sheets append.
-- `SUPPLIER_SEEDS_JSON` — optional private list of seed companies, for example `["Company A","Company B"]`.
-
-Give `supplier-radar-runtime` service account `lockbox.payloadViewer` on this secret.
-
-The Search API key should belong to a service account that is allowed to use Search API and be scoped to Search API execution.
-
-## 5. GitHub repository variables
-
-In GitHub Actions repository variables set:
+Google Sheet:
 
 ```text
-YC_SA_ID=<DEPLOY_SA_ID>
-YC_RUNTIME_SA_ID=<RUNTIME_SA_ID>
-YC_FOLDER_ID=<YC_FOLDER_ID>
-YC_REGISTRY_ID=<YC_REGISTRY_ID>
-SUPPLIER_SHEET_ID=1oP6pury0HB_M8ajF6--l2PF25m2alB5tjwP7I-YFg0M
+1oP6pury0HB_M8ajF6--l2PF25m2alB5tjwP7I-YFg0M
 ```
 
-And `YC_REVISION_SECRETS` as multiline text, substituting the real Lockbox secret ID:
+Таблица должна быть расшарена с `client_email` из `GOOGLE_SERVICE_ACCOUNT_JSON` с правом редактора.
 
-```text
-YANDEX_SEARCH_API_KEY=<secret-id>/latest/YANDEX_SEARCH_API_KEY
-GOOGLE_SERVICE_ACCOUNT_JSON=<secret-id>/latest/GOOGLE_SERVICE_ACCOUNT_JSON
-SUPPLIER_SEEDS_JSON=<secret-id>/latest/SUPPLIER_SEEDS_JSON
-```
-
-Nonexistent optional keys should be removed from `YC_REVISION_SECRETS` until they exist.
-
-## 6. First deploy
-
-Run GitHub Action `Deploy Supplier Radar to Yandex Cloud` manually, or push to `main` after all variables are set.
-
-The action creates/updates a private Serverless Container named `supplier-radar` and prints `Container ID` / `Revision ID` to the GitHub Actions summary.
-
-## 7. Hourly timer
-
-After the first deploy:
+## 4. Прямой deploy в Yandex Cloud
 
 ```bash
-CONTAINER_ID='<container-id-from-deploy>'
-
-yc serverless trigger create timer \
-  --name supplier-radar-hourly \
-  --cron-expression '0 * ? * * *' \
-  --invoke-container-id "$CONTAINER_ID" \
-  --invoke-container-service-account-id "$RUNTIME_SA_ID"
+export YC_FOLDER_ID='<folder-id>'
+export YANDEX_LOCKBOX_SECRET_ID='<secret-id-from-bootstrap>'
+./deploy/yandex-cloud/deploy-direct.sh
 ```
 
-Yandex timer cron is UTC. The query planner itself rotates search branches by UTC hourly slot, so every invocation does not repeat exactly the same 100 queries.
+Скрипт:
 
-## 8. Budget guard
+1. собирает Docker image;
+2. пушит его в Yandex Container Registry;
+3. создаёт/обновляет private Serverless Container;
+4. подставляет Search API и Google credentials из Lockbox;
+5. ставит `execution-timeout=3300s` и `concurrency=1`;
+6. создаёт Yandex Timer `supplier-radar-hourly` с cron `5 * ? * * *`;
+7. печатает `CONTAINER_ID`, `REVISION_ID`, `TRIGGER_ID`.
 
-Current config uses deferred Search API and caps the search plan to the lower of:
+Cron Yandex Timer задаётся в UTC, но для ежечасного расписания минутная отметка `:05` остаётся `:05` в каждом часовом слоте.
 
-- 100 requests/run;
-- 10 ₽/run;
-- `100 ₽ / expected_runs_per_day`.
+## 5. Что считается успешным первым запуском
 
-At 24 runs/day and planning price 0.0305 ₽/request, the daily guard reduces the effective maximum to ~4.17 ₽/run; a full 100-query run costs about 3.05 ₽ of Search API calls, so it stays below the configured daily cap before any future LLM stage.
+В Google Sheet должны появиться:
+
+- `Состояние радара`: строки `START`, `SEARCH_BATCH_*`, `ENRICH`, `DEEP_SCAN`, `FINISH`;
+- `Автокандидаты`: новые уникальные кандидаты с `score >= 40`;
+- `Журнал прогонов`: итоговая строка `Yandex Cloud / Search API / staging`.
+
+`Поставщики` не должен автоматически пополняться без отдельной гео/B2B проверки.
+
+## 6. Runtime safety
+
+- технический hard limit контейнера: 3300 секунд;
+- рабочая цель: до 3000 секунд полезной работы;
+- последние ~240 секунд зарезервированы на checkpoint/Sheets/finalize;
+- Yandex Search план ограничен бюджетом;
+- глубокая проверка продолжается только пока есть сильные кандидаты, без искусственного `sleep` ради 50 минут;
+- история берётся из Google Sheet, поэтому перезапуск контейнера не обнуляет память поиска.
+
+## 7. После первого успешного Yandex-прогона
+
+ChatGPT automation `Пушкино — поставщики` можно выключить как поисковый fallback и оставить ChatGPT только для контроля качества/ручной проверки кандидатов. `Радар: автоулучшение 50 мин` — отдельный проект и может оставаться включённым.
