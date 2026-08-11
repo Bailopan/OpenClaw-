@@ -65,7 +65,7 @@ class DeferredSearchClient:
             return raw.encode("utf-8")
         return bytes(raw)
 
-    def search_many(self, queries: Iterable[str], *, workers: int = 8) -> list[SearchResponse]:
+    def _search_batch(self, queries: list[str], *, workers: int) -> list[SearchResponse]:
         started: list[tuple[str, object]] = []
         out: list[SearchResponse] = []
         for query in queries:
@@ -83,6 +83,21 @@ class DeferredSearchClient:
                     out.append(SearchResponse(query=query, rows=parse_search_xml(raw)))
                 except Exception as exc:
                     out.append(SearchResponse(query=query, rows=[], error=f"wait:{type(exc).__name__}"))
+        return out
+
+    def search_many(
+        self,
+        queries: Iterable[str],
+        *,
+        workers: int = 8,
+        batch_size: int = 100,
+    ) -> list[SearchResponse]:
+        query_list = list(queries)
+        batch_size = max(1, min(200, int(batch_size)))
+        out: list[SearchResponse] = []
+        for offset in range(0, len(query_list), batch_size):
+            batch = query_list[offset : offset + batch_size]
+            out.extend(self._search_batch(batch, workers=workers))
         return out
 
 
