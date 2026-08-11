@@ -1,7 +1,37 @@
 {
-  "regions": ["Пушкино", "Ивантеевка", "Королев", "Мытищи", "Щелково", "Софрино"],
-  "categories": ["хозтовары", "бытовая химия", "пластиковые изделия", "упаковка", "косметика", "гигиена"],
+  "regions": [
+    "Пушкино",
+    "Ивантеевка",
+    "Королев",
+    "Мытищи",
+    "Щелково",
+    "Софрино"
+  ],
+  "categories": [
+    "хозтовары",
+    "бытовая химия",
+    "пластиковые изделия",
+    "упаковка",
+    "косметика",
+    "гигиена"
+  ],
+  "address_clusters": [
+    "Кудринское шоссе 2 Пушкино",
+    "Западная улица 1А Пушкино",
+    "улица Лермонтова 37А Пушкино",
+    "Учинская улица Пушкино",
+    "Ярославское шоссе 1А Пушкино",
+    "Заводская улица 9 Пушкино",
+    "Пушкинское поле"
+  ],
+  "seed_entities": [],
+  "results_per_query": 20,
   "max_search_requests_per_run": 100,
+  "deferred_search_price_rub_per_request": 0.0305,
   "max_search_cost_rub_per_run": 10,
-  "max_search_cost_rub_per_day": 100
+  "max_search_cost_rub_per_day": 100,
+  "max_enrichment_pages_per_run": 40,
+  "search_wait_workers": 8,
+  "enrichment_concurrency": 8,
+  "expected_runs_per_day": 24
 }
