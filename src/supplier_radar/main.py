@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 import uuid
 
+from .checkpoint import CheckpointWriter
 from .classify import supplier_score
 from .dedupe import dedupe_by_domain
 from .enrich import enrich_candidates
@@ -48,30 +49,40 @@ def _cost_cap(cfg: dict) -> int:
     return min(request_cap, int(budget // price))
 
 
-async def run() -> dict:
-    cfg = _load_config()
-    run_id = f"SR-{datetime.now(MSK):%Y%m%d-%H%M}-{uuid.uuid4().hex[:6]}"
-    started = time.monotonic()
-    slot = int(datetime.now(UTC).timestamp() // 3600)
-    max_queries = _cost_cap(cfg)
-    plan = build_query_plan(cfg, slot=slot, limit=max_queries)
-    price = float(cfg.get("deferred_search_price_rub_per_request", 0.0305))
+def _checkpoint_path(run_id: str) -> Path:
+    root = Path(os.getenv("SUPPLIER_RADAR_CHECKPOINT_DIR", "outputs/checkpoints"))
+    return root / f"{run_id}.jsonl"
 
-    _log("run_start", run_id=run_id, planned_queries=len(plan), mode="deferred")
-    client = DeferredSearchClient(docs_on_page=int(cfg.get("results_per_query", 20)))
-    responses = await asyncio.to_thread(
-        client.search_many,
-        [item.query for item in plan],
-        workers=int(cfg.get("search_wait_workers", 8)),
-    )
-    meta_by_query = {item.query: item for item in plan}
+
+def _compact_rows(rows: list[dict]) -> list[dict]:
+    compact: list[dict] = []
+    for item in sorted(
+        dedupe_by_domain(rows),
+        key=lambda x: int(x.get("supplier_score") or 0),
+        reverse=True,
+    ):
+        compact.append(
+            {
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "snippet": str(item.get("snippet") or "")[:700],
+                "supplier_score": int(item.get("supplier_score") or 0),
+                "query": item.get("query"),
+                "branch": item.get("branch"),
+                "region": item.get("region"),
+                "category": item.get("category"),
+            }
+        )
+    return compact
+
+
+def _rows_from_responses(responses, meta_by_query: dict) -> tuple[list[dict], int]:
     rows: list[dict] = []
     errors = 0
     for response in responses:
         meta = meta_by_query.get(response.query)
         if response.error:
             errors += 1
-            _log("query_error", run_id=run_id, query=response.query[:180], error=response.error)
         for item in response.rows:
             text = f"{item.get('title', '')} {item.get('snippet', '')}"
             item["supplier_score"] = supplier_score(text)
@@ -80,8 +91,138 @@ async def run() -> dict:
             item["region"] = meta.region if meta else ""
             item["category"] = meta.category if meta else ""
             rows.append(item)
+    return rows, errors
+
+
+async def run() -> dict:
+    cfg = _load_config()
+    run_id = f"SR-{datetime.now(MSK):%Y%m%d-%H%M}-{uuid.uuid4().hex[:6]}"
+    started = time.monotonic()
+    started_at_msk = datetime.now(MSK)
+    slot = int(os.getenv("SUPPLIER_PLAN_SLOT", int(datetime.now(UTC).timestamp() // 3600)))
+    max_queries = _cost_cap(cfg)
+    plan = build_query_plan(cfg, slot=slot, limit=max_queries)
+    price = float(cfg.get("deferred_search_price_rub_per_request", 0.0305))
+    batch_size = max(1, min(100, int(cfg.get("checkpoint_batch_size", 100))))
+    soft_limit = max(0, int(cfg.get("soft_runtime_limit_seconds", 0)))
+    checkpoint = CheckpointWriter(_checkpoint_path(run_id))
+
+    checkpoint.append(
+        "run_start",
+        run_id=run_id,
+        planned_queries=len(plan),
+        batch_size=batch_size,
+        estimated_max_search_cost_rub=round(len(plan) * price, 2),
+        plan_slot=slot,
+    )
+    _log(
+        "run_start",
+        run_id=run_id,
+        planned_queries=len(plan),
+        batch_size=batch_size,
+        checkpoint=str(checkpoint.path),
+        mode="deferred",
+    )
+
+    client = DeferredSearchClient(docs_on_page=int(cfg.get("results_per_query", 20)))
+    meta_by_query = {item.query: item for item in plan}
+    rows: list[dict] = []
+    errors = 0
+    raw_results = 0
+    completed_queries = 0
+    stopped_early = False
+    total_batches = (len(plan) + batch_size - 1) // batch_size if plan else 0
+
+    for batch_index, offset in enumerate(range(0, len(plan), batch_size), start=1):
+        if soft_limit and time.monotonic() - started >= soft_limit:
+            stopped_early = True
+            checkpoint.append(
+                "soft_stop",
+                run_id=run_id,
+                completed_queries=completed_queries,
+                elapsed_seconds=round(time.monotonic() - started, 2),
+            )
+            _log(
+                "soft_stop",
+                run_id=run_id,
+                completed_queries=completed_queries,
+                planned_queries=len(plan),
+            )
+            break
+
+        batch_plan = plan[offset : offset + batch_size]
+        batch_queries = [item.query for item in batch_plan]
+        checkpoint.append(
+            "batch_start",
+            run_id=run_id,
+            batch=batch_index,
+            batches_total=total_batches,
+            offset=offset,
+            queries=len(batch_queries),
+            estimated_batch_cost_rub=round(len(batch_queries) * price, 2),
+        )
+        try:
+            responses = await asyncio.to_thread(
+                client.search_many,
+                batch_queries,
+                workers=int(cfg.get("search_wait_workers", 8)),
+                batch_size=batch_size,
+            )
+        except BaseException as exc:
+            checkpoint.append(
+                "batch_abort",
+                run_id=run_id,
+                batch=batch_index,
+                completed_queries=completed_queries,
+                error=type(exc).__name__,
+            )
+            raise
+
+        batch_rows, batch_errors = _rows_from_responses(responses, meta_by_query)
+        batch_raw_results = sum(len(r.rows) for r in responses)
+        rows.extend(batch_rows)
+        errors += batch_errors
+        raw_results += batch_raw_results
+        completed_queries += len(batch_queries)
+        compact = _compact_rows(batch_rows)
+        checkpoint.append(
+            "batch_finish",
+            run_id=run_id,
+            batch=batch_index,
+            batches_total=total_batches,
+            requests_completed=completed_queries,
+            batch_query_errors=batch_errors,
+            batch_raw_results=batch_raw_results,
+            batch_unique_domains=len(compact),
+            batch_candidates_24_plus=sum(1 for r in compact if int(r.get("supplier_score") or 0) >= 24),
+            estimated_cost_rub=round(completed_queries * price, 2),
+            results=compact,
+        )
+        _log(
+            "batch_progress",
+            run_id=run_id,
+            batch=batch_index,
+            batches_total=total_batches,
+            requests_completed=completed_queries,
+            planned_queries=len(plan),
+            raw_results=raw_results,
+            query_errors=errors,
+            estimated_cost_rub=round(completed_queries * price, 2),
+        )
 
     rows = sorted(dedupe_by_domain(rows), key=lambda x: x.get("supplier_score", 0), reverse=True)
+    checkpoint.append(
+        "search_finish",
+        run_id=run_id,
+        stopped_early=stopped_early,
+        requests_completed=completed_queries,
+        raw_results=raw_results,
+        unique_domains=len(rows),
+        query_errors=errors,
+        estimated_search_cost_rub=round(completed_queries * price, 2),
+        results=_compact_rows(rows),
+    )
+
     enrichment_limit = int(cfg.get("max_enrichment_pages_per_run", 40))
     rows = await enrich_candidates(
         rows,
@@ -100,16 +241,18 @@ async def run() -> dict:
     finished_at = datetime.now(MSK)
     summary = {
         "run_id": run_id,
-        "status": "OK" if errors < len(plan) else "PARTIAL",
-        "started_at_msk": datetime.fromtimestamp(time.time() - (time.monotonic() - started), MSK).isoformat(timespec="seconds"),
+        "status": "PARTIAL" if stopped_early or errors else "OK",
+        "started_at_msk": started_at_msk.isoformat(timespec="seconds"),
         "finished_at_msk": finished_at.isoformat(timespec="seconds"),
         "duration_seconds": round(time.monotonic() - started, 2),
-        "requests_used": len(plan),
+        "planned_queries": len(plan),
+        "requests_used": completed_queries,
         "query_errors": errors,
-        "raw_results": sum(len(r.rows) for r in responses),
+        "raw_results": raw_results,
         "unique_domains": len(rows),
         "candidates_24_plus": sum(1 for r in rows if int(r.get("supplier_score") or 0) >= 24),
-        "estimated_search_cost_rub": round(len(plan) * price, 2),
+        "estimated_search_cost_rub": round(completed_queries * price, 2),
+        "checkpoint": str(checkpoint.path),
         "top": [
             {
                 "title": r.get("title"),
@@ -127,6 +270,7 @@ async def run() -> dict:
         summary["sheets"] = {"enabled": True, "appended": 0, "error": type(exc).__name__}
         _log("sheets_error", run_id=run_id, error=type(exc).__name__)
 
+    checkpoint.append("run_finish", **summary)
     _log("run_finish", **summary)
     return {"summary": summary, "results": rows[:200]}
 
