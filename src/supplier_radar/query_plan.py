@@ -95,36 +95,37 @@ def build_query_plan(config: dict, *, slot: int, limit: int) -> list[PlannedQuer
     addresses = list(config.get("address_clusters") or [])
     seeds = list(config.get("seed_entities") or [])
 
-    direct_template = DIRECT_TEMPLATES[slot % len(DIRECT_TEMPLATES)]
     priority: list[PlannedQuery] = []
-    for region in regions:
-        for category in categories:
-            priority.append(
-                PlannedQuery(
-                    branch="A_direct",
-                    query=direct_template.format(category=category, region=region),
-                    region=region,
-                    category=category,
+    # Large runs should deepen coverage, not just rotate one direct wording.
+    for direct_template in DIRECT_TEMPLATES:
+        for region in regions:
+            for category in categories:
+                priority.append(
+                    PlannedQuery(
+                        branch="A_direct",
+                        query=direct_template.format(category=category, region=region),
+                        region=region,
+                        category=category,
+                    )
                 )
-            )
 
     for address in addresses:
         priority.append(PlannedQuery("C_address_cluster", f'"{address}" склад опт производитель'))
         priority.append(PlannedQuery("C_address_cluster", f'"{address}" компания производство'))
 
     reverse_variants = ("склад опт", "производитель дистрибьютор", "ИНН адрес")
-    for idx, entity in enumerate(seeds):
-        suffix = reverse_variants[(slot + idx) % len(reverse_variants)]
-        priority.append(PlannedQuery("H_reverse_entity", f'"{entity}" {suffix}'))
+    for entity in seeds:
+        for suffix in reverse_variants:
+            priority.append(PlannedQuery("H_reverse_entity", f'"{entity}" {suffix}'))
 
     secondary: list[PlannedQuery] = []
     for branch, templates in BRANCH_TEMPLATES.items():
         for template in templates:
             for region in regions:
                 if "{category}" in template:
-                    category = categories[(slot + len(secondary)) % len(categories)] if categories else ""
-                    query = template.format(category=category, region=region)
-                    secondary.append(PlannedQuery(branch, query, region, category))
+                    for category in categories:
+                        query = template.format(category=category, region=region)
+                        secondary.append(PlannedQuery(branch, query, region, category))
                 else:
                     query = template.format(region=region)
                     secondary.append(PlannedQuery(branch, query, region, ""))
