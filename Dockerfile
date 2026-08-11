@@ -5,4 +5,4 @@ COPY src ./src
 COPY config ./config
 RUN pip install --no-cache-dir -r requirements.txt
 ENV PYTHONPATH=/app/src
-CMD ["python", "-m", "supplier_radar.main"]
+CMD ["python", "-m", "supplier_radar.server"]
