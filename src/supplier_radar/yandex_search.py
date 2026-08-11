@@ -45,7 +45,12 @@ class DeferredSearchClient:
         api_key = os.environ["YANDEX_SEARCH_API_KEY"]
         folder_id = os.environ["YANDEX_FOLDER_ID"]
         self._sdk = AIStudio(folder_id=folder_id, auth=api_key)
-        self._search = self._sdk.search_api.web(search_type="RU", docs_on_page=docs_on_page)
+        self._search = self._sdk.search_api.web(
+            search_type="RU",
+            groups_on_page=max(1, min(100, docs_on_page)),
+            docs_in_group=1,
+            max_passages=5,
+        )
 
     def start(self, query: str):
         return self._search.run_deferred(query, format="xml", timeout=30)
@@ -53,9 +58,9 @@ class DeferredSearchClient:
     @staticmethod
     def _wait(operation) -> bytes:
         try:
-            raw = operation.wait(timeout=30, poll_timeout=180, poll_interval=1)
-        except TypeError:
             raw = operation.wait(timeout=180)
+        except TypeError:
+            raw = operation.wait()
         if isinstance(raw, str):
             return raw.encode("utf-8")
         return bytes(raw)
