@@ -5,7 +5,14 @@
     "Королев",
     "Мытищи",
     "Щелково",
-    "Софрино"
+    "Софрино",
+    "Правдинский",
+    "Мамонтовка",
+    "Лесной",
+    "Красноармейск",
+    "Фрязино",
+    "Хотьково",
+    "Сергиев Посад"
   ],
   "categories": [
     "хозтовары",
@@ -13,25 +20,42 @@
     "пластиковые изделия",
     "упаковка",
     "косметика",
-    "гигиена"
+    "гигиена",
+    "товары для дома",
+    "кухонные товары",
+    "товары для уборки",
+    "товары для животных",
+    "автотовары",
+    "электроаксессуары",
+    "детские товары",
+    "расходные материалы"
   ],
   "address_clusters": [
     "Кудринское шоссе 2 Пушкино",
+    "Кудринское шоссе 6 Пушкино",
     "Западная улица 1А Пушкино",
     "улица Лермонтова 37А Пушкино",
     "Учинская улица Пушкино",
     "Ярославское шоссе 1А Пушкино",
+    "Ярославское шоссе 226А Пушкино",
     "Заводская улица 9 Пушкино",
-    "Пушкинское поле"
+    "Пушкинское поле",
+    "Костомаровская улица 5/1 Пушкино",
+    "Рабочая улица 1с5 Мамонтовка",
+    "Институтский проезд 3 Правдинский"
   ],
   "seed_entities": [],
   "results_per_query": 20,
-  "max_search_requests_per_run": 100,
+  "max_search_requests_per_run": 50,
   "deferred_search_price_rub_per_request": 0.0305,
-  "max_search_cost_rub_per_run": 10,
-  "max_search_cost_rub_per_day": 100,
-  "max_enrichment_pages_per_run": 40,
+  "max_search_cost_rub_per_run": 1.60,
+  "max_search_cost_rub_per_day": 40.0,
+  "max_enrichment_pages_per_run": 200,
   "search_wait_workers": 8,
-  "enrichment_concurrency": 8,
-  "expected_runs_per_day": 24
+  "enrichment_concurrency": 6,
+  "expected_runs_per_day": 24,
+  "checkpoint_batch_size": 25,
+  "soft_runtime_limit_seconds": 2700,
+  "deep_pages_per_supplier": 6,
+  "deep_scan_concurrency": 4
 }
