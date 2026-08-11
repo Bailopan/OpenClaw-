@@ -1,0 +1,74 @@
+name: Deploy Supplier Radar to Yandex Cloud
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: supplier-radar-yandex-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Safe no-op until the one-time Yandex bootstrap has populated repository variables.
+    if: >-
+      ${{
+        vars.YC_SA_ID != '' &&
+        vars.YC_FOLDER_ID != '' &&
+        vars.YC_REGISTRY_ID != '' &&
+        vars.YC_RUNTIME_SA_ID != ''
+      }}
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: cr.yandex/${{ vars.YC_REGISTRY_ID }}/supplier-radar:${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Yandex Container Registry via GitHub OIDC
+        uses: yc-actions/yc-cr-login@v3
+        with:
+          yc-sa-id: ${{ vars.YC_SA_ID }}
+
+      - name: Build and push image
+        run: |
+          docker build --pull -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy private Serverless Container revision
+        id: deploy
+        uses: yc-actions/yc-sls-container-deploy@v4
+        with:
+          yc-sa-id: ${{ vars.YC_SA_ID }}
+          folder-id: ${{ vars.YC_FOLDER_ID }}
+          container-name: supplier-radar
+          public: false
+          revision-service-account-id: ${{ vars.YC_RUNTIME_SA_ID }}
+          revision-cores: 1
+          revision-memory: 1Gb
+          revision-core-fraction: 100
+          revision-concurrency: 1
+          revision-image-url: ${{ env.IMAGE }}
+          revision-execution-timeout: 3600
+          revision-runtime: http
+          revision-env: |
+            YANDEX_FOLDER_ID=${{ vars.YC_FOLDER_ID }}
+            SUPPLIER_SHEET_ID=${{ vars.SUPPLIER_SHEET_ID }}
+          revision-secrets: ${{ vars.YC_REVISION_SECRETS }}
+          revision-log-options-min-level: info
+
+      - name: Deployment summary
+        run: |
+          echo "### Supplier Radar deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Container ID: ${{ steps.deploy.outputs.id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Revision ID: ${{ steps.deploy.outputs.rev }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Timer is a one-time Yandex bootstrap resource; see deploy/yandex-cloud/BOOTSTRAP.md" >> "$GITHUB_STEP_SUMMARY"
