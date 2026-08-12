@@ -10,7 +10,6 @@ for c in yc docker jq curl; do
   command -v "$c" >/dev/null || { echo "ERROR: $c is required" >&2; exit 2; }
 done
 
-# Verify yc is actually authenticated before doing any writes.
 yc config set folder-id "$YC_FOLDER_ID" >/dev/null
 yc resource-manager folder get "$YC_FOLDER_ID" >/dev/null
 
@@ -22,7 +21,6 @@ LOCKBOX_ID="${YANDEX_LOCKBOX_SECRET_ID:-$(printf '%s\n' "$BOOTSTRAP_OUT" | awk -
 [[ -n "$LOCKBOX_ID" ]] || { echo "ERROR: cannot resolve Lockbox secret id" >&2; exit 3; }
 export YANDEX_LOCKBOX_SECRET_ID="$LOCKBOX_ID"
 
-# Do not print payloads. Only verify that one active version exposes required entry KEYS.
 ACTIVE_VERSION_ID="$(yc lockbox secret list-versions --id "$LOCKBOX_ID" --format json | jq -r '[.[] | select((.status // "ACTIVE") == "ACTIVE")][0].id // .[0].id // empty')"
 [[ -n "$ACTIVE_VERSION_ID" ]] || { echo "ERROR: Lockbox has no active version" >&2; exit 4; }
 KEYS="$(yc lockbox payload get --id "$LOCKBOX_ID" --version-id "$ACTIVE_VERSION_ID" --format json | jq -r '.entries[]?.key')"
@@ -61,7 +59,6 @@ if [[ "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 300 ]]; then
   exit 8
 fi
 
-# Give the app a chance to finish writing its terminal checkpoint, but do not fake runtime.
 echo "[5/5] deployment complete; verify Sheet terminal evidence"
 echo "YANDEX_AUTOPILOT_DEPLOYED"
 echo "CONTAINER_ID=$CONTAINER_ID"
